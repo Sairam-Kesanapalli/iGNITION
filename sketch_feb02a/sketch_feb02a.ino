@@ -1,26 +1,70 @@
 #include <Wire.h>
-#include <MPU6050.h>
+#include <LiquidCrystal_PCF8574.h>
 
-#define TRIG 5
-#define ECHO 18
+#define TRIG_PIN 5
+#define ECHO_PIN 18
+
+LiquidCrystal_PCF8574 lcd(0x27);
+
+// -------- VARIABLES --------
+int occupancyCount = 0;
 
 long history[5] = {0};
-int index = 0;
+int histIndex = 0;
+bool bufferFilled = false;
 
-int occupancyCount = 0;
-MPU6050 mpu;
+unsigned long lastTriggerTime = 0;
+const int cooldown = 2000;
 
+// -------- DISTANCE --------
 long getDistance() {
-  digitalWrite(TRIG, LOW);
+  digitalWrite(TRIG_PIN, LOW);
   delayMicroseconds(2);
-  digitalWrite(TRIG, HIGH);
+
+  digitalWrite(TRIG_PIN, HIGH);
   delayMicroseconds(10);
-  digitalWrite(TRIG, LOW);
+  digitalWrite(TRIG_PIN, LOW);
 
-  long duration = pulseIn(ECHO, HIGH);
-  long distance = duration * 0.034 / 2;
+  long duration = pulseIn(ECHO_PIN, HIGH, 30000);
+  if (duration == 0) return -1;
 
-  return distance;
+  long d = duration * 0.034 / 2;
+  if (d < 2 || d > 400) return -1;
+
+  return d;
+}
+
+// -------- FILTER --------
+long getFilteredDistance() {
+  long readings[5];
+  int count = 0;
+
+  for (int i = 0; i < 5; i++) {
+    long d = getDistance();
+    if (d != -1) readings[count++] = d;
+    delay(5);
+  }
+
+  if (count == 0) return -1;
+
+  for (int i = 0; i < count - 1; i++) {
+    for (int j = i + 1; j < count; j++) {
+      if (readings[i] > readings[j]) {
+        long t = readings[i];
+        readings[i] = readings[j];
+        readings[j] = t;
+      }
+    }
+  }
+
+  return readings[count / 2];
+}
+
+// -------- TREND --------
+void updateHistory(long d) {
+  history[histIndex] = d;
+  histIndex = (histIndex + 1) % 5;
+  if (histIndex == 0) bufferFilled = true;
 }
 
 bool isIncreasing() {
@@ -35,57 +79,79 @@ bool isDecreasing() {
   return true;
 }
 
+// -------- SETUP --------
 void setup() {
   Serial.begin(115200);
-  Wire.begin(21, 22);  // SDA, SCL
 
-  mpu.initialize();
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
 
-  if (mpu.testConnection()) {
-    Serial.println("MPU6050 Connected");
-  } else {
-    Serial.println("MPU6050 Connection Failed");
-  }
+  lcd.begin(16, 2);
+  lcd.setBacklight(255);
+
+  lcd.setCursor(0, 0);
+  lcd.print("People Counter");
+  delay(1000);
+  lcd.clear();
 }
 
+// -------- LOOP --------
 void loop() {
-  int16_t ax, ay, az;
-  int16_t gx, gy, gz;
 
-  // Read distance
-  long distance = getDistance();
-  
-  // Store in history (sliding window)
-  history[index] = distance;
-  index++;
-  
-  if (index == 5) {
-    index = 0;
-  
-    // Check motion trend
-    if (isIncreasing()) {
-      occupancyCount++;
-    } 
-    else if (isDecreasing()) {
-      occupancyCount--;
+  long d = getFilteredDistance();
+
+  // 🔥 SERIAL OUTPUT
+  Serial.print("Distance: ");
+  Serial.print(d);
+  Serial.println(" cm");
+
+  if (d != -1) {
+    updateHistory(d);
+
+    if (bufferFilled && millis() - lastTriggerTime > cooldown) {
+
+      // ENTER
+      if (isIncreasing()) {
+        occupancyCount++;
+
+        Serial.println("ENTER detected");
+
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print(">> ENTER >>");
+        delay(500);
+
+        lastTriggerTime = millis();
+      }
+
+      // EXIT
+      else if (isDecreasing()) {
+        occupancyCount--;
+
+        if (occupancyCount < 0) occupancyCount = 0;
+
+        Serial.println("EXIT detected");
+
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("<< EXIT <<");
+        delay(500);
+
+        lastTriggerTime = millis();
+      }
     }
-  
-    if (occupancyCount < 0) occupancyCount = 0;
   }
 
-  mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
+  // LCD DISPLAY
+  lcd.setCursor(0, 0);
+  lcd.print("People: ");
+  lcd.print(occupancyCount);
+  lcd.print("   ");
 
-  // Send as CSV (easy for Python)
-  Serial.print("IMU:");
-  Serial.print(ax); Serial.print(",");
-  Serial.print(ay); Serial.print(",");
-  Serial.print(az); Serial.print(",");
-  Serial.print(gx); Serial.print(",");
-  Serial.print(gy); Serial.print(",");
-  Serial.print(gz);
-  
-  Serial.print("|COUNT:");
-  Serial.println(occupancyCount);
-  
+  lcd.setCursor(0, 1);
+  lcd.print("Dist: ");
+  lcd.print(d);
+  lcd.print("cm   ");
+
   delay(200);
 }
