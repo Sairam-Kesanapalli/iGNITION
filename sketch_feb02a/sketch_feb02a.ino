@@ -4,11 +4,18 @@
 #define TRIG_PIN 5
 #define ECHO_PIN 18
 #define BUZZER 23
+#define PULSE_PIN 34
 
 LiquidCrystal_PCF8574 lcd(0x27);
 
 // -------- VARIABLES --------
 int occupancyCount = 0;
+
+int pulseValue = 0;
+int heartRate = 0;
+
+unsigned long lastBeatTime = 0;
+int threshold = 550; // adjust if needed
 
 long history[5] = {0};
 int histIndex = 0;
@@ -84,6 +91,8 @@ bool isDecreasing() {
 void setup() {
   Serial.begin(115200);
 
+  pinMode(PULSE_PIN, INPUT);
+  
   pinMode(BUZZER, OUTPUT);
   digitalWrite(BUZZER, LOW);
 
@@ -109,7 +118,29 @@ void loop() {
   Serial.print(d);
   Serial.println(" cm");
 
-   if (Serial.available()) {
+  pulseValue = analogRead(PULSE_PIN);
+  
+  // detect beat
+  if (pulseValue > threshold) {
+    unsigned long currentTime = millis();
+    
+    if (currentTime - lastBeatTime > 300) { // debounce
+      heartRate = 60000 / (currentTime - lastBeatTime);
+      lastBeatTime = currentTime;
+  
+      Serial.print("BPM: ");
+      Serial.println(heartRate);
+  
+      // 🚨 ALERT
+      if (heartRate > 120 || heartRate < 50) {
+        digitalWrite(BUZZER, HIGH);
+      } else {
+        digitalWrite(BUZZER, LOW);
+      }
+    }
+  }
+
+  if (Serial.available()) {
     String msg = Serial.readStringUntil('\n');
   
     if (msg == "ALERT") {
@@ -162,6 +193,11 @@ void loop() {
   lcd.print(occupancyCount);
   lcd.print("   ");
 
+  lcd.setCursor(0, 1);
+  lcd.print("HR:");
+  lcd.print(heartRate);
+  lcd.print("   ");
+  
   lcd.setCursor(0, 1);
   Serial.print("DIST:");
   Serial.print(d);
