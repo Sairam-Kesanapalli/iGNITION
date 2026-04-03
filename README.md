@@ -62,6 +62,8 @@ The system continuously monitors driver drowsiness/head behavior and bus environ
 
 Commit history may show only Sairam in some phases. This was intentional to reduce merge conflicts during rapid integration. Team contributions are shared across implementation, hardware, and integration work.
 
+Some folders may be intentionally left empty to preserve expected project structure and avoid environment/setup issues across different systems.
+
 ## Quick Setup
 
 ### 1) Python side
