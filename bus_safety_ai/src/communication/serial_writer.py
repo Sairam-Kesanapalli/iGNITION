@@ -22,7 +22,7 @@ class BusSerialWriter:
 		Maps high-level alert state to Arduino command.
 		Arduino sketch currently reacts to any ALERT* command.
 		"""
-		alert_on_medium = os.getenv("ALERT_ON_MEDIUM", "0").strip().lower() in {"1", "true", "yes", "on"}
+		alert_on_medium = os.getenv("ALERT_ON_MEDIUM", "1").strip().lower() in {"1", "true", "yes", "on"}
 		allowed_levels = {"CRITICAL", "HIGH"}
 		if alert_on_medium:
 			allowed_levels.add("MEDIUM")

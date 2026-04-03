@@ -26,6 +26,9 @@ class BusSerialReader:
 			return None
 
 		try:
+			# Avoid blocking the camera loop when no serial bytes are available.
+			if hasattr(self.ser, "in_waiting") and self.ser.in_waiting <= 0:
+				return None
 			line = self.ser.readline().decode(errors="ignore").strip()
 		except Exception:
 			return None

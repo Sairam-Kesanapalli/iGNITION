@@ -1,7 +1,7 @@
 {
   "driver_name": "sairam",
   "created_at": "2026-04-03T11:28:40",
-  "updated_at": "2026-04-03T11:52:49",
+  "updated_at": "2026-04-03T15:18:38",
   "target_calibration_days": 5,
   "calibrated_days_count": 1,
   "sessions": [
@@ -19,11 +19,28 @@
       "ear_closed_threshold": 0.3,
       "open_samples": 1,
       "closed_samples": 141
+    },
+    {
+      "timestamp": "2026-04-03T15:18:38",
+      "model_closed_threshold": 0.3405,
+      "ear_closed_threshold": 0.28049999999999997,
+      "open_samples": 0,
+      "closed_samples": 0,
+      "head_samples": 184
     }
   ],
   "active_thresholds": {
     "model_closed_threshold": 0.3405,
     "ear_closed_threshold": 0.28049999999999997,
-    "computed_from_sessions": 2
+    "computed_from_sessions": 3
+  },
+  "head_active": {
+    "yaw_center": 0.00530894473195076,
+    "pitch_center": 0.06591659039258957,
+    "roll_center": 4.772927761077881,
+    "yaw_threshold": 0.18121609628200533,
+    "pitch_threshold": 0.13999999999999999,
+    "roll_threshold_deg": 19.6879638671875,
+    "samples": 184
   }
 }

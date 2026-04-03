@@ -55,6 +55,7 @@ CALIBRATION_MODE = os.getenv("CALIBRATION_MODE", "full").strip().lower()
 HEAD_YAW_THRESHOLD = float(os.getenv("HEAD_YAW_THRESHOLD", "0.22"))
 HEAD_PITCH_THRESHOLD = float(os.getenv("HEAD_PITCH_THRESHOLD", "0.20"))
 HEAD_ROLL_THRESHOLD_DEG = float(os.getenv("HEAD_ROLL_THRESHOLD_DEG", "22"))
+HEAD_AUTO_CALIBRATE = os.getenv("HEAD_AUTO_CALIBRATE", "1").strip().lower() in {"1", "true", "yes", "on"}
 DRIVER_PROFILE_NAME = os.getenv("DRIVER_PROFILE", "sairam").strip().lower()
 PROFILE_TARGET_DAYS = int(os.getenv("PROFILE_TARGET_DAYS", "5"))
 PROFILE_ROLLING_SESSIONS = int(os.getenv("PROFILE_ROLLING_SESSIONS", "10"))
@@ -68,6 +69,14 @@ MEDIUM_BUZZER_DELAY_SEC = float(os.getenv("MEDIUM_BUZZER_DELAY_SEC", "1.2"))
 HEAD_MODEL_CONF_THRESHOLD = float(os.getenv("HEAD_MODEL_CONF_THRESHOLD", "0.55"))
 HEAD_LOOK_AWAY_SUPPRESS = os.getenv("HEAD_LOOK_AWAY_SUPPRESS", "1").strip().lower() in {"1", "true", "yes", "on"}
 WINDOW_NAME = "SMART BUS SAFETY SYSTEM"
+
+HEAD_YAW_CENTER = 0.0
+HEAD_PITCH_CENTER = 0.0
+HEAD_ROLL_CENTER = 0.0
+HEAD_YAW_THRESHOLD_ACTIVE = HEAD_YAW_THRESHOLD
+HEAD_PITCH_THRESHOLD_ACTIVE = HEAD_PITCH_THRESHOLD
+HEAD_ROLL_THRESHOLD_DEG_ACTIVE = HEAD_ROLL_THRESHOLD_DEG
+HEAD_BASELINE_SAMPLES = 0
 
 
 def resolve_serial_port(configured_port):
@@ -122,6 +131,9 @@ def load_driver_profile(driver_name):
 
 def apply_driver_profile(profile):
     global MODEL_CLOSED_THRESHOLD, EAR_CLOSED_THRESHOLD
+    global HEAD_YAW_CENTER, HEAD_PITCH_CENTER, HEAD_ROLL_CENTER
+    global HEAD_YAW_THRESHOLD_ACTIVE, HEAD_PITCH_THRESHOLD_ACTIVE, HEAD_ROLL_THRESHOLD_DEG_ACTIVE
+    global HEAD_BASELINE_SAMPLES
     thresholds = profile.get("active_thresholds", {})
     model_thr = thresholds.get("model_closed_threshold")
     ear_thr = thresholds.get("ear_closed_threshold")
@@ -131,11 +143,28 @@ def apply_driver_profile(profile):
     if ear_thr is not None:
         EAR_CLOSED_THRESHOLD = float(ear_thr)
 
+    head_cfg = profile.get("head_active", {})
+    if isinstance(head_cfg, dict) and head_cfg:
+        HEAD_YAW_CENTER = float(head_cfg.get("yaw_center", 0.0))
+        HEAD_PITCH_CENTER = float(head_cfg.get("pitch_center", 0.0))
+        HEAD_ROLL_CENTER = float(head_cfg.get("roll_center", 0.0))
+        HEAD_YAW_THRESHOLD_ACTIVE = float(head_cfg.get("yaw_threshold", HEAD_YAW_THRESHOLD))
+        HEAD_PITCH_THRESHOLD_ACTIVE = float(head_cfg.get("pitch_threshold", HEAD_PITCH_THRESHOLD))
+        HEAD_ROLL_THRESHOLD_DEG_ACTIVE = float(head_cfg.get("roll_threshold_deg", HEAD_ROLL_THRESHOLD_DEG))
+        HEAD_BASELINE_SAMPLES = int(head_cfg.get("samples", 0))
+
     print(
         f"Loaded driver profile '{profile.get('driver_name', 'unknown')}' "
         f"with MODEL_CLOSED_THRESHOLD={MODEL_CLOSED_THRESHOLD:.3f}, "
         f"EAR_CLOSED_THRESHOLD={EAR_CLOSED_THRESHOLD:.3f}"
     )
+    if HEAD_BASELINE_SAMPLES > 0:
+        print(
+            "Head profile active: "
+            f"center(y={HEAD_YAW_CENTER:.3f}, p={HEAD_PITCH_CENTER:.3f}, r={HEAD_ROLL_CENTER:.1f}) "
+            f"thr(y={HEAD_YAW_THRESHOLD_ACTIVE:.3f}, p={HEAD_PITCH_THRESHOLD_ACTIVE:.3f}, "
+            f"r={HEAD_ROLL_THRESHOLD_DEG_ACTIVE:.1f}) samples={HEAD_BASELINE_SAMPLES}"
+        )
 
 
 def save_driver_profile(driver_name, model_thr, ear_thr, metadata=None):
@@ -190,6 +219,17 @@ def save_driver_profile(driver_name, model_thr, ear_thr, metadata=None):
         "computed_from_sessions": len(rolling),
     }
 
+    if HEAD_BASELINE_SAMPLES > 0:
+        profile["head_active"] = {
+            "yaw_center": float(HEAD_YAW_CENTER),
+            "pitch_center": float(HEAD_PITCH_CENTER),
+            "roll_center": float(HEAD_ROLL_CENTER),
+            "yaw_threshold": float(HEAD_YAW_THRESHOLD_ACTIVE),
+            "pitch_threshold": float(HEAD_PITCH_THRESHOLD_ACTIVE),
+            "roll_threshold_deg": float(HEAD_ROLL_THRESHOLD_DEG_ACTIVE),
+            "samples": int(HEAD_BASELINE_SAMPLES),
+        }
+
     with path.open("w", encoding="utf-8") as f:
         json.dump(profile, f, indent=2)
 
@@ -243,6 +283,8 @@ if HEAD_MODEL_PATH.exists() and HEAD_SCALER_PATH.exists():
     except Exception as exc:
         head_model = None
         print(f"Head model load failed: {exc}")
+else:
+    print("Head model artifacts not found, using heuristic head-state fallback.")
 
 # -------- MEDIAPIPE --------
 BaseOptions = mp.tasks.BaseOptions
@@ -258,7 +300,7 @@ landmarker = FaceLandmarker.create_from_options(options)
 
 # -------- SERIAL SETUP --------
 SERIAL_PORT = resolve_serial_port(SERIAL_PORT)
-serial_reader = BusSerialReader(port=SERIAL_PORT, baud=SERIAL_BAUD, timeout=1.0)
+serial_reader = BusSerialReader(port=SERIAL_PORT, baud=SERIAL_BAUD, timeout=0.02)
 if serial_reader.connect():
     print(f"Serial connected on {SERIAL_PORT} @ {SERIAL_BAUD}")
 else:
@@ -394,16 +436,23 @@ def estimate_head_pose(lm):
 
     roll_deg = math.degrees(math.atan2(eye_dy, eye_dx))
 
+    yaw_dev = yaw - HEAD_YAW_CENTER
+    pitch_dev = pitch - HEAD_PITCH_CENTER
+    roll_dev = roll_deg - HEAD_ROLL_CENTER
+
     is_frontal = (
-        abs(yaw) <= HEAD_YAW_THRESHOLD
-        and abs(pitch) <= HEAD_PITCH_THRESHOLD
-        and abs(roll_deg) <= HEAD_ROLL_THRESHOLD_DEG
+        abs(yaw_dev) <= HEAD_YAW_THRESHOLD_ACTIVE
+        and abs(pitch_dev) <= HEAD_PITCH_THRESHOLD_ACTIVE
+        and abs(roll_dev) <= HEAD_ROLL_THRESHOLD_DEG_ACTIVE
     )
 
     return {
         "yaw": yaw,
         "pitch": pitch,
         "roll_deg": roll_deg,
+        "yaw_dev": yaw_dev,
+        "pitch_dev": pitch_dev,
+        "roll_dev": roll_dev,
         "is_frontal": is_frontal,
     }
 
@@ -422,11 +471,11 @@ def classify_head_state(head_pose):
             return HEAD_CLASSES[idx], conf
 
     # Fallback heuristic when model is unavailable/uncertain.
-    if abs(head_pose["yaw"]) > HEAD_YAW_THRESHOLD * 1.6:
+    if abs(head_pose["yaw_dev"]) > HEAD_YAW_THRESHOLD_ACTIVE * 1.6:
         return "look_away", 0.5
-    if head_pose["pitch"] > HEAD_PITCH_THRESHOLD * 1.4:
+    if head_pose["pitch_dev"] > HEAD_PITCH_THRESHOLD_ACTIVE * 1.4:
         return "tilt_forward", 0.5
-    if abs(head_pose["roll_deg"]) > HEAD_ROLL_THRESHOLD_DEG * 1.2:
+    if abs(head_pose["roll_dev"]) > HEAD_ROLL_THRESHOLD_DEG_ACTIVE * 1.2:
         return "tilt_side", 0.5
     return "normal", 0.5
 
@@ -465,13 +514,15 @@ def extract_eye_metrics(frame):
     head_state = "unknown"
     head_conf = 0.0
     drowsy_valid = False
+    pose_frontal = False
 
     if result.face_landmarks:
         face_detected = True
         lm = result.face_landmarks[0]
         head_pose = estimate_head_pose(lm)
+        pose_frontal = bool(head_pose["is_frontal"])
         head_state, head_conf = classify_head_state(head_pose)
-        drowsy_valid = head_pose["is_frontal"]
+        drowsy_valid = True
 
         left_eye = extract_eye(frame, lm, LEFT_EYE, w, h)
         right_eye = extract_eye(frame, lm, RIGHT_EYE, w, h)
@@ -521,6 +572,7 @@ def extract_eye_metrics(frame):
         "head_state": head_state,
         "head_conf": head_conf,
         "drowsy_valid": drowsy_valid,
+        "pose_frontal": pose_frontal,
         "eyes_visible": eyes_visible if face_detected else 0,
     }
 
@@ -529,6 +581,7 @@ def _run_calibration_phase(cap, seconds, line1, line2):
     start_time = time.time()
     ear_samples = []
     closed_model_samples = []
+    head_samples = []
 
     while True:
         elapsed = time.time() - start_time
@@ -544,6 +597,9 @@ def _run_calibration_phase(cap, seconds, line1, line2):
             if metrics["mean_ear"] is not None:
                 ear_samples.append(metrics["mean_ear"])
             closed_model_samples.append(metrics["closed_prob_model"])
+            if metrics.get("head_pose") is not None:
+                hp = metrics["head_pose"]
+                head_samples.append([hp["yaw"], hp["pitch"], hp["roll_deg"]])
 
         remaining = max(0, int(seconds - elapsed))
         cv2.putText(frame, "AUTO CALIBRATION", (10, 30), 0, 0.9, (0, 255, 255), 2)
@@ -558,27 +614,78 @@ def _run_calibration_phase(cap, seconds, line1, line2):
             print("Calibration interrupted by ESC.")
             break
 
-    return ear_samples, closed_model_samples
+    return ear_samples, closed_model_samples, head_samples
 
 
 def run_auto_calibration(cap, seconds, close_seconds, mode="full"):
     global MODEL_CLOSED_THRESHOLD, EAR_CLOSED_THRESHOLD
+    global HEAD_YAW_CENTER, HEAD_PITCH_CENTER, HEAD_ROLL_CENTER
+    global HEAD_YAW_THRESHOLD_ACTIVE, HEAD_PITCH_THRESHOLD_ACTIVE, HEAD_ROLL_THRESHOLD_DEG_ACTIVE
+    global HEAD_BASELINE_SAMPLES
 
     open_ear_samples = []
     open_closed_model_samples = []
+    open_head_samples = []
     if mode in {"full", "open_only"} and seconds > 0:
         print(f"Starting phase-1 calibration for {seconds}s (open eyes baseline).")
-        open_ear_samples, open_closed_model_samples = _run_calibration_phase(
+        open_ear_samples, open_closed_model_samples, open_head_samples = _run_calibration_phase(
             cap,
             seconds,
             "Phase 1/2: keep eyes open naturally",
             "Look at camera with normal blinking",
+        )
+    elif mode == "head_only" and seconds > 0:
+        print(f"Starting head-only calibration for {seconds}s (frontal baseline).")
+        _, _, open_head_samples = _run_calibration_phase(
+            cap,
+            seconds,
+            "Head-only calibration",
+            "Keep normal driving pose / mirror checks",
         )
 
     if mode == "close_only":
         # Use active thresholds as open baseline when collecting only phase-2.
         open_ear_samples = [EAR_CLOSED_THRESHOLD / 0.72]
         open_closed_model_samples = [max(0.0, min(1.0, MODEL_CLOSED_THRESHOLD - 0.18))]
+
+    if open_head_samples:
+        arr = np.array(open_head_samples, dtype=np.float32)
+        yaw_vals = arr[:, 0]
+        pitch_vals = arr[:, 1]
+        roll_vals = arr[:, 2]
+
+        HEAD_YAW_CENTER = float(np.median(yaw_vals))
+        HEAD_PITCH_CENTER = float(np.median(pitch_vals))
+        HEAD_ROLL_CENTER = float(np.median(roll_vals))
+
+        yaw_std = float(np.std(yaw_vals))
+        pitch_std = float(np.std(pitch_vals))
+        roll_std = float(np.std(roll_vals))
+
+        HEAD_YAW_THRESHOLD_ACTIVE = float(np.clip(max(HEAD_YAW_THRESHOLD * 0.70, 2.6 * yaw_std + 0.04), 0.12, 0.40))
+        HEAD_PITCH_THRESHOLD_ACTIVE = float(np.clip(max(HEAD_PITCH_THRESHOLD * 0.70, 2.6 * pitch_std + 0.04), 0.10, 0.35))
+        HEAD_ROLL_THRESHOLD_DEG_ACTIVE = float(np.clip(max(HEAD_ROLL_THRESHOLD_DEG * 0.65, 2.8 * roll_std + 4.0), 8.0, 35.0))
+        HEAD_BASELINE_SAMPLES = int(len(open_head_samples))
+
+        print(
+            "Head calibration complete: "
+            f"center(y={HEAD_YAW_CENTER:.3f}, p={HEAD_PITCH_CENTER:.3f}, r={HEAD_ROLL_CENTER:.1f}) "
+            f"thr(y={HEAD_YAW_THRESHOLD_ACTIVE:.3f}, p={HEAD_PITCH_THRESHOLD_ACTIVE:.3f}, "
+            f"r={HEAD_ROLL_THRESHOLD_DEG_ACTIVE:.1f})"
+        )
+    elif mode == "head_only":
+        print("Head calibration skipped: no face samples captured.")
+        return None
+
+    if mode == "head_only":
+        print("Head-only mode: eye thresholds kept unchanged.")
+        return {
+            "model_closed_threshold": float(MODEL_CLOSED_THRESHOLD),
+            "ear_closed_threshold": float(EAR_CLOSED_THRESHOLD),
+            "open_samples": 0,
+            "closed_samples": 0,
+            "head_samples": int(HEAD_BASELINE_SAMPLES),
+        }
 
     if not open_closed_model_samples:
         print("Calibration skipped: no open-baseline samples available.")
@@ -588,7 +695,7 @@ def run_auto_calibration(cap, seconds, close_seconds, mode="full"):
     closed_model_samples = []
     if mode in {"full", "close_only"} and close_seconds > 0:
         print(f"Starting phase-2 calibration for {close_seconds}s (blink/close baseline).")
-        closed_ear_samples, closed_model_samples = _run_calibration_phase(
+        closed_ear_samples, closed_model_samples, _ = _run_calibration_phase(
             cap,
             close_seconds,
             "Phase 2/2: do slow long blinks",
@@ -624,6 +731,7 @@ def run_auto_calibration(cap, seconds, close_seconds, mode="full"):
         "ear_closed_threshold": float(EAR_CLOSED_THRESHOLD),
         "open_samples": len(open_closed_model_samples),
         "closed_samples": len(closed_model_samples),
+        "head_samples": int(HEAD_BASELINE_SAMPLES),
     }
 
 # -------- CAMERA --------
@@ -655,7 +763,11 @@ loaded_profile = load_driver_profile(DRIVER_PROFILE_NAME)
 if loaded_profile:
     apply_driver_profile(loaded_profile)
 
-if AUTO_CALIBRATE and (CALIBRATION_SECONDS > 0 or CALIBRATION_MODE == "close_only"):
+should_calibrate = AUTO_CALIBRATE and (CALIBRATION_SECONDS > 0 or CALIBRATION_MODE in {"close_only", "head_only"})
+if CALIBRATION_MODE == "head_only" and not HEAD_AUTO_CALIBRATE:
+    should_calibrate = False
+
+if should_calibrate:
     calibration_result = run_auto_calibration(cap, CALIBRATION_SECONDS, CALIBRATION_CLOSE_SECONDS, CALIBRATION_MODE)
     if calibration_result is not None:
         save_driver_profile(
@@ -665,6 +777,7 @@ if AUTO_CALIBRATE and (CALIBRATION_SECONDS > 0 or CALIBRATION_MODE == "close_onl
             metadata={
                 "open_samples": calibration_result["open_samples"],
                 "closed_samples": calibration_result["closed_samples"],
+                "head_samples": calibration_result.get("head_samples", 0),
             },
         )
 
@@ -688,6 +801,7 @@ cached_metrics = {
     "head_state": "unknown",
     "head_conf": 0.0,
     "drowsy_valid": False,
+    "pose_frontal": False,
     "eyes_visible": 0,
 }
 
@@ -734,6 +848,7 @@ while True:
     head_pose = metrics["head_pose"]
     head_state = metrics.get("head_state", "unknown")
     head_conf = metrics.get("head_conf", 0.0)
+    pose_frontal = metrics.get("pose_frontal", False)
     eyes_visible = metrics.get("eyes_visible", 0)
 
     # ---- DROWSINESS ----
@@ -753,12 +868,12 @@ while True:
         final_alert = "NORMAL"
 
     # If face/pose is not valid, suppress vision-triggered alarms while driver checks road/mirrors.
-    vision_valid = face_detected and drowsy_valid and eyes_visible >= 2
+    vision_valid = face_detected and eyes_visible >= 2
     if not vision_valid and final_alert in {"MEDIUM", "HIGH"}:
         final_alert = "NORMAL"
 
     # Use integrated head model output to reduce false positives and escalate risky posture.
-    if HEAD_LOOK_AWAY_SUPPRESS and head_state == "look_away" and final_alert in {"MEDIUM", "HIGH"}:
+    if HEAD_LOOK_AWAY_SUPPRESS and head_state == "look_away" and head_conf >= 0.5 and final_alert in {"MEDIUM", "HIGH"}:
         final_alert = "NORMAL"
     elif head_state in {"tilt_forward", "tilt_side"} and final_alert == "MEDIUM":
         final_alert = "HIGH"
@@ -804,8 +919,8 @@ while True:
     cv2.putText(frame, f"EAR: {mean_ear if mean_ear is not None else -1:.3f}", (260,55), 0, 0.6, (255,255,255), 2)
     if head_pose is not None:
         cv2.putText(frame, f"Yaw:{head_pose['yaw']:.2f} Pitch:{head_pose['pitch']:.2f} Roll:{head_pose['roll_deg']:.1f}", (10, 77), 0, 0.55, (220,220,220), 2)
-        pose_text = "POSE:FRONTAL" if drowsy_valid else "POSE:TURNING"
-        pose_color = (0, 255, 0) if drowsy_valid else (0, 165, 255)
+        pose_text = "POSE:FRONTAL" if pose_frontal else "POSE:TURNING"
+        pose_color = (0, 255, 0) if pose_frontal else (0, 165, 255)
         cv2.putText(frame, pose_text, (310, 77), 0, 0.55, pose_color, 2)
         cv2.putText(frame, f"HeadState: {head_state} ({head_conf:.2f})", (10, 102), 0, 0.55, (180, 255, 180), 2)
     else:
@@ -827,8 +942,8 @@ while True:
 
     # Manual buzzer test shortcuts.
     if key == ord('b'):
-        serial_writer.send("ALERT_TEST")
-        print("Manual buzzer test: ALERT_TEST sent")
+        serial_writer.send("ALERT_HIGH")
+        print("Manual buzzer test: ALERT_HIGH sent")
     elif key == ord('n'):
         serial_writer.send("OK")
         print("Manual buzzer test: OK sent")
