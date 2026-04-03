@@ -4,18 +4,15 @@
 #define TRIG_PIN 5
 #define ECHO_PIN 18
 #define BUZZER 23
-#define PULSE_PIN 34
 
 LiquidCrystal_PCF8574 lcd(0x27);
 
 // -------- VARIABLES --------
 int occupancyCount = 0;
 
-int pulseValue = 0;
-int heartRate = 0;
-
-unsigned long lastBeatTime = 0;
-int threshold = 550; // adjust if needed
+bool serverAlertActive = false;
+unsigned long serverAlertUntil = 0;
+const unsigned long serverAlertHoldMs = 3000;
 
 long history[5] = {0};
 int histIndex = 0;
@@ -90,8 +87,6 @@ bool isDecreasing() {
 // -------- SETUP --------
 void setup() {
   Serial.begin(115200);
-
-  pinMode(PULSE_PIN, INPUT);
   
   pinMode(BUZZER, OUTPUT);
   digitalWrite(BUZZER, LOW);
@@ -118,48 +113,41 @@ void loop() {
   Serial.print(d);
   Serial.println(" cm");
 
-  pulseValue = analogRead(PULSE_PIN);
+  if (Serial.available()) {
+    String msg = Serial.readStringUntil('\n');
+    msg.trim();
   
-  // detect beat
-  if (pulseValue > threshold) {
-    unsigned long currentTime = millis();
-    
-    if (currentTime - lastBeatTime > 300) { // debounce
-      heartRate = 60000 / (currentTime - lastBeatTime);
-      lastBeatTime = currentTime;
-  
-      Serial.print("BPM: ");
-      Serial.println(heartRate);
-  
-      // 🚨 ALERT
-      if (heartRate > 120 || heartRate < 50) {
-        digitalWrite(BUZZER, HIGH);
-      } else {
-        digitalWrite(BUZZER, LOW);
-      }
+    if (msg.startsWith("ALERT")) {
+      serverAlertActive = true;
+      serverAlertUntil = millis() + serverAlertHoldMs;
+    } else if (msg == "OK") {
+      serverAlertActive = false;
+      serverAlertUntil = 0;
     }
   }
 
-  if (Serial.available()) {
-    String msg = Serial.readStringUntil('\n');
-  
-    if (msg == "ALERT") {
-      digitalWrite(BUZZER, HIGH);
-    } else {
-      digitalWrite(BUZZER, LOW);
-    }
+  if (serverAlertActive && millis() > serverAlertUntil) {
+    serverAlertActive = false;
+  }
+
+  if (serverAlertActive) {
+    digitalWrite(BUZZER, HIGH);
+  } else {
+    digitalWrite(BUZZER, LOW);
   }
   
   if (d != -1) {
     updateHistory(d);
 
     if (bufferFilled && millis() - lastTriggerTime > cooldown) {
-
       // ENTER
       if (isIncreasing()) {
         occupancyCount++;
 
         Serial.println("ENTER detected");
+        Serial.print("COUNT:");
+        Serial.print(occupancyCount);
+        Serial.println(",DOOR:MAIN,EVENT:ENTER");
 
         lcd.clear();
         lcd.setCursor(0, 0);
@@ -176,6 +164,9 @@ void loop() {
         if (occupancyCount < 0) occupancyCount = 0;
 
         Serial.println("EXIT detected");
+        Serial.print("COUNT:");
+        Serial.print(occupancyCount);
+        Serial.println(",DOOR:MAIN,EVENT:EXIT");
 
         lcd.clear();
         lcd.setCursor(0, 0);
@@ -194,8 +185,8 @@ void loop() {
   lcd.print("   ");
 
   lcd.setCursor(0, 1);
-  lcd.print("HR:");
-  lcd.print(heartRate);
+  lcd.print("Dist:");
+  lcd.print(d);
   lcd.print("   ");
   
   lcd.setCursor(0, 1);
