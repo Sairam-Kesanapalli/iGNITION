@@ -938,29 +938,24 @@ while True:
     key = -1
 
     # ---- SEND ALERT ----
-    buzzer_level = final_alert
-    if final_alert == "MEDIUM":
-        if medium_state_since is None:
-            medium_state_since = now
-        medium_elapsed = now - medium_state_since
-        if (not BUZZER_ON_MEDIUM) or (medium_elapsed < MEDIUM_BUZZER_DELAY_SEC):
-            buzzer_level = "NORMAL"
-    else:
-        medium_state_since = None
+    buzzer_level = "OFF"
+    if final_alert == "HIGH":
+        buzzer_level = "HIGH"
+    elif final_alert == "MEDIUM" and BUZZER_ON_MEDIUM:
+        buzzer_level = "MEDIUM"
 
-    is_alert_state = buzzer_level in {"CRITICAL", "HIGH", "MEDIUM"}
-    should_send = False
-
-    if buzzer_level != last_sent_alert:
-        should_send = True
-    elif is_alert_state and (now - last_alert_tx_time) >= ALERT_RESEND_INTERVAL_SEC:
-        # Keep sending ALERT periodically so Arduino latch stays active.
-        should_send = True
-
-    if should_send:
+    # Send command if alert state changes or for periodic resend
+    if buzzer_level != last_sent_alert or (
+        buzzer_level != "OFF" and (now - last_alert_tx_time) > ALERT_RESEND_INTERVAL_SEC
+    ):
         if send_buzzer_command(buzzer_level):
             last_sent_alert = buzzer_level
             last_alert_tx_time = now
+            print(f"BUZZER CMD: Sent {buzzer_level} (reason: {final_alert})")
+        else:
+            print(f"BUZZER CMD: Failed to send {buzzer_level}")
+
+    key = -1
 
     # ---- COLOR ----
     color = (0,255,0)
