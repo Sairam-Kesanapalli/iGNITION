@@ -886,7 +886,7 @@ while True:
     face_missing_secs = max(0.0, now - last_face_seen_ts) if not face_detected else 0.0
 
     # ---- DROWSINESS ----
-    score, perclos, duration = tracker.update(fused_closed_prob, face_detected=(face_detected and drowsy_valid))
+    score, perclos, duration = tracker.update(fused_closed_prob, face_detected=face_detected)
 
     # ---- IMU ----
     imu_state = process_imu(imu_data)
@@ -900,6 +900,13 @@ while True:
         final_alert = "MEDIUM"
     else:
         final_alert = "NORMAL"
+
+    # Fallback path: sustained closed eyes should still alarm even if model score is conservative.
+    if face_detected and fused_closed_prob >= MODEL_CLOSED_THRESHOLD:
+        if duration >= 1.2:
+            final_alert = "HIGH"
+        elif duration >= 0.7 and final_alert == "NORMAL":
+            final_alert = "MEDIUM"
 
     # If face/pose is not valid, suppress vision-triggered alarms while driver checks road/mirrors.
     vision_valid = face_detected and eyes_visible >= 2

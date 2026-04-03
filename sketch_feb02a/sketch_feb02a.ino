@@ -131,11 +131,10 @@ void setBuzzer(bool on) {
     digitalWrite(BUZZER, on ? LOW : HIGH);
   } else {
     if (on) {
+      // On ESP32, writing HIGH after tone() can override PWM and mute passive buzzers.
       tone(BUZZER, BUZZER_TONE_HZ);
-      digitalWrite(BUZZER, HIGH);
     } else {
       noTone(BUZZER);
-      digitalWrite(BUZZER, LOW);
     }
   }
 
